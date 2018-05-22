@@ -94,4 +94,18 @@ OPERATOR_SCHEMA(Conv3D)
     .FillUsing(ConvDocGenerator("3D "))
     .InheritOnnxSchema("Conv");
 
+
+/**** Memory Efficient Convolution ****/
+
+REGISTER_CPU_OPERATOR(Conv_MEC, ConvOp<float, CPUContext>);
+
+OPERATOR_SCHEMA(Conv_MEC)
+    .NumInputs(2, 3)
+    .NumOutputs(1)
+    .TensorInferenceFunction(ConvPoolOpBase<CPUContext>::TensorInferenceForConv)
+    .CostInferenceFunction(OpSchema::CostInferenceFunctionType(
+        ConvPoolOpBase<CPUContext>::CostInferenceForConv))
+    .FillUsing(ConvDocGenerator(""))
+    .InheritOnnxSchema("Conv_MEC");
+
 } // namespace caffe2

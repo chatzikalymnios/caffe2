@@ -261,7 +261,7 @@ constexpr int CAFFE_CUDA_NUM_THREADS = 512;
 // This number is very carelessly chosen. Ideally, one would like to look at
 // the hardware at runtime, and pick the number of blocks that makes most
 // sense for the specific runtime environment. This is a todo item.
-constexpr int CAFFE_MAXIMUM_NUM_BLOCKS = 4096;
+constexpr int CAFFE_MAXIMUM_NUM_BLOCKS = 65536;
 
 /**
  * @brief Compute the number of blocks needed to run N threads.
