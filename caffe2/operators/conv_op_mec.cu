@@ -243,7 +243,7 @@ class MecOpBase : public ConvPoolOpBase<CUDAContext> {
 
     CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(top_desc_));
 
-    cudaFree(d_pointers);
+//    cudaFree(d_pointers);
   }
 
  protected:
@@ -340,7 +340,10 @@ class MecOp final : public MecOpBase {
   ~MecOp() {}
 
   template <typename T_X, typename T_W, typename T_B, typename T_Y>
-  bool DoRunWithType();
+  bool Solution_A_DoRunWithType();
+
+  template <typename T_X, typename T_W, typename T_B, typename T_Y>
+  bool Solution_B_DoRunWithType();
 
   bool RunOnDevice() override;
 
@@ -355,7 +358,303 @@ class MecOp final : public MecOpBase {
 ////////////////////////////////////////////////////////////////////////////////
 
 template <typename T_X, typename T_W, typename T_B, typename T_Y>
-bool MecOp::DoRunWithType() {
+bool MecOp::Solution_A_DoRunWithType() {
+  auto& X = Input(INPUT);
+  auto& filter = Input(FILTER);
+  auto* Y = Output(0);
+
+//  clock_t begin = clock();
+
+  // Figure out the output shape
+  CAFFE_ENFORCE(X.ndim() >= 3 && X.ndim() <= 5);
+  CAFFE_ENFORCE(filter.ndim() >= 3 && filter.ndim() <= 5);
+  const int M = filter.dim32(0);
+  ConvPoolOpBase<CUDAContext>::SetOutputSize(X, Y, M);
+  int N = 0, C = 0, H = 0, W = 0, D = 0, H_out = 0, W_out = 0, D_out = 0;
+
+  int I_n = 0, I_c = 0, I_h = 0, I_w = 0, K_h = 0, K_w = 0, K_c = 0;
+
+  Tensor<CUDAContext> *O;
+
+  switch (order_) {
+    case StorageOrder::NHWC:
+      N = X.dim32(0);
+      H = X.dim32(1);
+      W = X.ndim() > 3 ? X.dim32(2) : 1;
+      D = X.ndim() > 4 ? X.dim32(3) : 1;
+      C = X.dim32(X.ndim() - 1);
+      H_out = Y->dim32(1);
+      W_out = Y->ndim() > 3 ? Y->dim32(2) : 1;
+      D_out = Y->ndim() > 4 ? Y->dim32(3) : 1;
+      for (int i = 0; i < kernel_.size(); ++i) {
+        CAFFE_ENFORCE_EQ(filter.dim32(i + 1), kernel_[i]);
+      }
+      CAFFE_ENFORCE_EQ(filter.dim32(filter.ndim() - 1), C);
+
+      I_n = N;
+      I_h = H + pad_t() + pad_b();
+      I_w = W + pad_l() + pad_r();
+      I_c = C;
+
+      K_h = filter.dim32(1);
+      K_w = filter.dim32(2);
+      K_c = filter.dim32(0);
+
+      // Descriptors
+
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        filter_desc_,
+        cudnnTypeWrapper<T_W>::type,
+        K_c, C, K_h, K_w,
+        C * K_h * K_w, 1, K_w * C, C)
+      );
+
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        top_desc_,
+        cudnnTypeWrapper<T_Y>::type,
+        I_n, K_c, H_out, W_out,
+        K_c * H_out * W_out, 1, W_out * K_c, K_c)
+      );
+
+      O = new Tensor<CUDAContext>((vector<int>) { I_n, H_out, W_out * K_c });
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        O_desc_,
+        cudnnTypeWrapper<T_Y>::type,
+        I_n, K_c, H_out, W_out,
+        K_c * W_out, 1, I_n * W_out * K_c, K_c)
+      );
+
+      break;
+    case StorageOrder::NCHW:
+      N = X.dim32(0);
+      C = X.dim32(1);
+      H = X.dim32(2);
+      W = X.ndim() > 3 ? X.dim32(3) : 1;
+      D = X.ndim() > 4 ? X.dim32(4) : 1;
+      H_out = Y->dim32(2);
+      W_out = Y->ndim() > 3 ? Y->dim32(3) : 1;
+      D_out = Y->ndim() > 4 ? Y->dim32(4) : 1;
+      CAFFE_ENFORCE_EQ(filter.dim32(1), C);
+      for (int i = 0; i < kernel_.size(); ++i) {
+        CAFFE_ENFORCE_EQ(filter.dim32(i + 2), kernel_[i]);
+      }
+
+      I_n = N;
+      I_h = H + pad_t() + pad_b();
+      I_w = W + pad_l() + pad_r();
+      I_c = C;
+
+      K_h = filter.dim32(2);
+      K_w = filter.dim32(3);
+      K_c = filter.dim32(0);
+
+      // Descriptors
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        filter_desc_,
+        cudnnTypeWrapper<T_W>::type,
+        K_c, C, K_h, K_w,
+        C * K_h * K_w, K_h * K_w, K_w, 1)
+      );
+
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        top_desc_,
+        cudnnTypeWrapper<T_Y>::type,
+        N, K_c, H_out, W_out,
+        K_c * H_out * W_out, H_out * W_out, W_out, 1)
+      );
+
+      O = new Tensor<CUDAContext>((vector<int>) { I_n, H_out, W_out * K_c });
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+        O_desc_,
+        cudnnTypeWrapper<T_Y>::type,
+        I_n, K_c, H_out, W_out,
+        K_c * W_out, 1, I_n * W_out * K_c, K_c)
+      );
+
+      break;
+    default:
+      LOG(FATAL) << "Unknown storage order: " << order_;
+  }
+
+//  cudaDeviceSynchronize();
+//  clock_t init_end = clock();
+
+  // Convert filter
+  Tensor<CUDAContext> K ((vector<int>) { K_h, K_w, I_c, K_c });
+  CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+    K_desc_,
+    cudnnTypeWrapper<T_W>::type,
+    K_c, C, K_h, K_w,
+    1, K_c, K_w * C * K_c, C * K_c)
+  );
+
+  cudnn_wrapper_.with_cudnn_state(cudnn_state_, [&](CuDNNState* state) {
+    CUDNN_ENFORCE(cudnnTransformTensor(
+      state->cudnn_handle(),
+      cudnnTypeWrapper<T_W>::kOne(),
+      filter_desc_,
+      filter.template data<T_W>(),
+      cudnnTypeWrapper<T_W>::kZero(),
+      K_desc_,
+      K.template mutable_data<T_W>()));
+  });
+
+//  cudaDeviceSynchronize();
+//  clock_t filc_end = clock();
+
+  // Pad and lower input
+
+  Tensor<CUDAContext> L((vector<int>) { I_n, W_out, I_h, K_w * I_c });
+
+  const float* X_data = X.template data<float>();
+  float* L_data = L.template mutable_data<float>();
+
+  dim3 grid(I_n, W_out, CAFFE_GET_BLOCKS(I_h * K_w * I_c));
+
+  if (order_ == StorageOrder::NCHW) {
+    impr_pad_and_lower_gpu_kernel_nchw<float><<<
+      grid,
+      CAFFE_CUDA_NUM_THREADS,
+      0,
+      context_.cuda_stream()>>>(
+        (int) L.size(),
+        X_data,
+        C,
+        H,
+        I_h,
+        W,
+        K_w,
+        pad_t(),
+        pad_l(),
+        stride_h(),
+        stride_w(),
+        W_out,
+        L_data
+    );
+  } else {
+    impr_pad_and_lower_gpu_kernel_nhwc<float><<<
+      grid,
+      CAFFE_CUDA_NUM_THREADS,
+      0,
+      context_.cuda_stream()>>>(
+        (int) L.size(),
+        X_data,
+        C,
+        H,
+        I_h,
+        W,
+        K_w,
+        pad_t(),
+        pad_l(),
+        stride_h(),
+        stride_w(),
+        W_out,
+        L_data
+    );
+  }
+
+//  TensorPrinter tp;
+//
+//  Tensor<CPUContext> CPU(X);
+//  tp.Print<float>(CPU);
+//
+//  Tensor<CPUContext> CPU2(L);
+//  tp.Print<float>(CPU2);
+
+//  cudaDeviceSynchronize();
+//  clock_t lower_end = clock();
+
+  // SOLUTION A
+
+  const float *K_data = K.template data<float>();
+  float *O_data = O->template mutable_data<float>();
+
+  const float Alpha = 1.0f;
+  const float Beta = 0.0f;
+
+    CUBLAS_ENFORCE(cublasSgemmStridedBatched(
+        context_.cublas_handle(),
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        K_c,
+        I_n * W_out,
+        K_h * K_w * I_c,
+        &Alpha,
+        K_data,
+        K_c,
+        0,
+        L_data,
+        I_h * K_w * I_c,
+        stride_h() * K_w * I_c,
+        &Beta,
+        O_data,
+        K_c,
+        I_n * W_out * K_c,
+        H_out));
+
+  cudnn_wrapper_.with_cudnn_state(cudnn_state_, [&](CuDNNState* state) {
+    CUDNN_ENFORCE(cudnnTransformTensor(
+      state->cudnn_handle(),
+      cudnnTypeWrapper<T_Y>::kOne(),
+      O_desc_,
+      O->template data<T_Y>(),
+      cudnnTypeWrapper<T_Y>::kZero(),
+      top_desc_,
+      Y->template mutable_data<T_Y>()));
+  });
+
+  delete(O);
+
+//  cudaDeviceSynchronize();
+//  clock_t trans_end = clock();
+
+  // Bias
+  if (InputSize() == 3) {
+    auto& bias = Input(BIAS);
+
+    CAFFE_ENFORCE_EQ(bias.ndim(), 1);
+    CAFFE_ENFORCE_EQ(bias.dim32(0), M);
+
+    CUDNN_ENFORCE(cudnnSetTensor4dDescriptorEx(
+      bias_desc_,
+      cudnnTypeWrapper<T_B>::type,
+      1, K_c, 1, 1,
+      K_c, 1, 1, 1)
+    );
+
+    CUDNN_ENFORCE(cudnnAddTensor(
+        cudnn_wrapper_.inline_cudnn_handle(),
+        cudnnTypeWrapper<T_B>::kOne(),
+        bias_desc_,
+        bias.template data<T_B>(),
+        cudnnTypeWrapper<T_Y>::kOne(),
+        top_desc_,
+        Y->template mutable_data<T_Y>()));
+  }
+
+//  cudaDeviceSynchronize();
+//  clock_t end = clock();
+//
+//  static int conv_num = 0;
+//  conv_num++;
+//  double elapsed_ms = double(end - begin) / CLOCKS_PER_SEC * 1000;
+//
+//  LOG(INFO) << "CONV " << conv_num << "\n\t" <<
+//    "N: " << N << " C: " << C << " H: " << H << " W: " << W << " K_c: " << K_c << " K_h: " << K_h << " K_w: " << K_w << "\n\t" <<
+//    "stride: " << stride_h() << " pad: " << pad_t() << "\n\t" <<
+//    "TIME: " << elapsed_ms << " ms\n\t" <<
+//    "INIT: " << double(init_end - begin) / CLOCKS_PER_SEC * 1000 << " ms" << "\n\t" <<
+//    "FILC: " << double(filc_end - init_end) / CLOCKS_PER_SEC * 1000 << " ms" << "\n\t" <<
+//    "LOWE: " << double(lower_end - filc_end) / CLOCKS_PER_SEC * 1000 << " ms" << "\n\t" <<
+//    "GEMM: " << double(gemm_end - lower_end) / CLOCKS_PER_SEC * 1000 << " ms" << "\n\t" <<
+//    "TRAN: " << double(trans_end - gemm_end) / CLOCKS_PER_SEC * 1000 << " ms" << "\n\t" <<
+//    "BIAS: " << double(end - trans_end) / CLOCKS_PER_SEC * 1000 << " ms";
+
+  return true;
+}
+
+template <typename T_X, typename T_W, typename T_B, typename T_Y>
+bool MecOp::Solution_B_DoRunWithType() {
   auto& X = Input(INPUT);
   auto& filter = Input(FILTER);
   auto* Y = Output(0);
@@ -544,9 +843,13 @@ bool MecOp::DoRunWithType() {
     );
   }
 
-//  TensorPrinter tp("","/home/ecs/wrong.txt",50000);
-//  Tensor<CPUContext> CPU(L);
+//  TensorPrinter tp;
+//
+//  Tensor<CPUContext> CPU(X);
 //  tp.Print<float>(CPU);
+//
+//  Tensor<CPUContext> CPU2(L);
+//  tp.Print<float>(CPU2);
 
 //  cudaDeviceSynchronize();
 //  clock_t lower_end = clock();
@@ -672,13 +975,13 @@ bool MecOp::DoRunWithType() {
 
 bool MecOp::RunOnDevice() {
   if (Input(0).IsType<float>()) {
-    return DoRunWithType<
+    return Solution_B_DoRunWithType<
         float, // X
         float, // W
         float, // B
         float>(); // Y
   } else if (Input(0).IsType<float16>()) {
-    return DoRunWithType<
+    return Solution_B_DoRunWithType<
         float16, // X
         float16, // W
         float16, // B
