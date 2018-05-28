@@ -242,8 +242,6 @@ class MecOpBase : public ConvPoolOpBase<CUDAContext> {
     CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(O_desc_));
 
     CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(top_desc_));
-
-//    cudaFree(d_pointers);
   }
 
  protected:
@@ -326,8 +324,6 @@ class MecOpBase : public ConvPoolOpBase<CUDAContext> {
   cudnnTensorDescriptor_t O_desc_; // O in MEC paper
 
   cudnnTensorDescriptor_t top_desc_;    // Y
-
-  const float **d_pointers;
 
   size_t cudnn_state_;
 };
@@ -886,9 +882,12 @@ bool MecOp::Solution_B_DoRunWithType() {
     }
   }
 
-  // Memory freed in destructor
+  const float **d_pointers;
   cudaMalloc((void**) &d_pointers, 3 * batch_size * sizeof(float *));
   cudaMemcpy(d_pointers, pointers.data(), 3 * batch_size * sizeof(float *), cudaMemcpyHostToDevice);
+
+  // Necessary to wait for cudaMemcpy to finish.
+  cudaDeviceSynchronize();
 
   CUBLAS_ENFORCE(cublasSgemmBatched(
         context_.cublas_handle(),
@@ -951,6 +950,8 @@ bool MecOp::Solution_B_DoRunWithType() {
         top_desc_,
         Y->template mutable_data<T_Y>()));
   }
+
+  cudaFree(d_pointers);
 
 //  cudaDeviceSynchronize();
 //  clock_t end = clock();
